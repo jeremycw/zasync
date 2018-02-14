@@ -20,6 +20,7 @@ typedef struct {
   zyield_t waiting_for;
   int state;
   struct zio_s* io;
+  void(*cb)(struct ev_loop*, ev_io*, int);
 } zstate_t;
 
 #define zdecl(name, ret, params, rest) \
@@ -183,14 +184,24 @@ typedef struct {
   struct name##_stack_s* zstack = malloc(sizeof(struct name##_stack_s)); \
   memset(&zstack->zz, 0, sizeof(zstack->zz)); \
   zassignparams(zstack, __VA_ARGS__) \
-  zstack->zz.waiting_for = name(zstack); \
+  zstack->zz.cb = name##_io_cb; \
+  zstack->zz.waiting_for = name(zstack);
 
-#define zown(name, fd) \
-  zownfn(name##_io_cb, fd, &z->zz, (void*)z);
+#define zown(fd) \
+  zownfn(fd, &z->zz, (void*)z);
+
+#define zread(ret, fd, buf, size) \
+  zyield(fd, EV_READ, ret = read(fd, buf, size);)
+
+#define zwrite(ret, fd, buf, size) \
+  zyield(fd, EV_WRITE, ret = write(fd, buf, size);)
+
+#define zaccept(ret, fd, addr, addrlen) \
+  zyield(fd, EV_READ, ret = accept(fd, addr, addrlen);)
 
 #endif
 
-void zownfn(void(*cb)(struct ev_loop*, ev_io*, int), int fd, zstate_t* zz, void*);
+void zownfn(int fd, zstate_t* zz, void*);
 void zclean(ev_io* w);
 void zinit();
 void zrun();
@@ -207,7 +218,7 @@ void zrun() {
   ev_run(zloop, 0);
 }
 
-void zownfn(void(*cb)(struct ev_loop*, ev_io*, int), int fd, zstate_t* zz, void* data) {
+void zownfn(int fd, zstate_t* zz, void* data) {
   struct zio_s* w = malloc(sizeof(struct zio_s));
   w->io.data = data;
   struct zio_s* head = zz->io;
@@ -215,7 +226,7 @@ void zownfn(void(*cb)(struct ev_loop*, ev_io*, int), int fd, zstate_t* zz, void*
   w->next = head;
   int flags = fcntl(fd, F_GETFL, 0);
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-  ev_io_init((ev_io*)w, cb, fd, EV_READ | EV_WRITE);
+  ev_io_init((ev_io*)w, zz->cb, fd, EV_READ | EV_WRITE);
   ev_io_start(zloop, (ev_io*)w);
 }
 

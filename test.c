@@ -12,18 +12,29 @@ zdecl(session,
   int bytes;
   char* buf;)
 zasync(session, {
-  zown(session, zarg(sock));
+  zown(zarg(sock));
   z->buf = malloc(128);
   while (1) {
-    zyield(zarg(sock), EV_READ, z->bytes = read(zarg(sock), z->buf, 128););
+    zread(z->bytes, zarg(sock), z->buf, 128);
     if (z->bytes == 0) {
       close(zarg(sock));
       free(z->buf);
       break;
     }
-    zyield(zarg(sock), EV_WRITE, write(zarg(sock), z->buf, z->bytes););
+    zwrite(z->bytes, zarg(sock), z->buf, z->bytes);
   }
 })
+
+void bind_localhost(int s, struct sockaddr_in* addr, int port) {
+  addr->sin_family = AF_INET;
+  addr->sin_addr.s_addr = INADDR_ANY;
+  addr->sin_port = htons(port);
+  int rc = bind(s, (struct sockaddr *)addr, sizeof(struct sockaddr_in));;
+  if (rc < 0) {
+    perror("error");
+    exit(1);
+  }
+}
 
 zdecl(server_listen,
   zrettype(int),
@@ -34,20 +45,12 @@ zdecl(server_listen,
   struct sockaddr_in addr;)
 zasync(server_listen, {
   z->ls = socket(AF_INET, SOCK_STREAM, 0);
-  z->addr.sin_family = AF_INET;
-  z->addr.sin_addr.s_addr = INADDR_ANY;
-  z->addr.sin_port = htons(zarg(port));
-  int rc = bind(z->ls, (struct sockaddr *)&z->addr, sizeof(z->addr));
-  if (rc < 0) {
-    perror("error");
-  }
+  zown(z->ls);
+  bind_localhost(z->ls, &z->addr, zarg(port));
   z->len = sizeof(z->addr);
-  zown(server_listen, z->ls);
   listen(z->ls, 10);
   while(1) {
-    printf("accepting...\n");
-    zyield(z->ls, EV_READ, z->s = accept(z->ls, (struct sockaddr *)&z->addr, &z->len););
-    printf("accepted\n");
+    zaccept(z->s, z->ls, (struct sockaddr *)&z->addr, &z->len);
     if (z->s <= 0) {
       continue;
     }
