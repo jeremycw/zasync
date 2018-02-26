@@ -1,6 +1,7 @@
 #ifndef ZASYNC_H
 #define ZASYNC_H
 
+#include <fcntl.h>
 #include <ev.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -21,7 +22,16 @@ typedef struct {
   int state;
   struct zio_s* io;
   void(*cb)(struct ev_loop*, ev_io*, int);
+  void(*sem_cb)(void*);
 } zstate_t;
+
+typedef struct {
+  char count;
+  void* stack;
+} zsemaphore;
+
+#define ZNO_FD_OP -2
+#define ZSEM_EV 1 
 
 #define zdecl(name, ret, params, rest) \
   struct name##_stack_s { \
@@ -34,6 +44,17 @@ typedef struct {
   }; \
   zyield_t name(struct name##_stack_s* z); \
   void name##_io_cb(EV_P_ ev_io *w, int revents); \
+  void name##_sem_cb(void*);
+
+#define zcallback(name, stack, fdes, ev_check) \
+  zyield_t wf = stack->zz.waiting_for; \
+  if (wf.fd == fdes && ev_check) { \
+    zyield_t r = name(stack); \
+    stack->zz.waiting_for = r; \
+    if (r.fd == -1) { \
+      zclean((void*)stack); \
+    } \
+  }
 
 #define zasync(name, block) \
   zyield_t name(struct name##_stack_s* z) { \
@@ -47,15 +68,12 @@ typedef struct {
   } \
   void name##_io_cb(EV_P_ ev_io *w, int revents) { \
     struct name##_stack_s* stack = (struct name##_stack_s*)w->data; \
-    zyield_t wf = stack->zz.waiting_for; \
-    if (wf.fd == w->fd && revents & wf.ev_type) { \
-      zyield_t r = name(stack); \
-      stack->zz.waiting_for = r; \
-      if (r.fd == -1) { \
-        zclean(w); \
-      } \
-    } \
+    zcallback(name, stack, w->fd, revents & stack->zz.waiting_for.ev_type) \
   } \
+  void name##_sem_cb(void* data) { \
+    struct name##_stack_s* stack = (struct name##_stack_s*)data; \
+    zcallback(name, stack, ZNO_FD_OP, stack->zz.waiting_for.ev_type == ZSEM_EV) \
+  }
 
 #define zyield(fdes, ev, code) \
   case __LINE__: \
@@ -76,29 +94,6 @@ typedef struct {
   r.fd = -1; \
   return r; \
 }
-
-#define zyieldret(value) \
-{ \
-  z->zretv = value; \
-  z->zz.state = __LINE__; \
-  zyield_t r; \
-  r.fd = 0; \
-  r.ev_type = 0; \
-  return r; \
-} \
-  case __LINE__: \
-
-#define zinvoke(name, ret, ...) \
-  //XXX need way to hold multiple child stacks \
-    zassignparams(childstack, __VA_ARGS__) \
-    { \
-      int done = name(childstack); \
-      z->ret = childstack->zretv; \
-      if (done) { \
-        free(childstack); \
-      } \
-    } \
-    XXX need to signal stop calling invoke
 
 #define zawait(name, ret, ...) \
   { \
@@ -181,11 +176,14 @@ typedef struct {
   name->p.p5 = pn5;
 
 #define zspawn(name, ...) \
+{ \
   struct name##_stack_s* zstack = malloc(sizeof(struct name##_stack_s)); \
   memset(&zstack->zz, 0, sizeof(zstack->zz)); \
   zassignparams(zstack, __VA_ARGS__) \
   zstack->zz.cb = name##_io_cb; \
-  zstack->zz.waiting_for = name(zstack);
+  zstack->zz.sem_cb = name##_sem_cb; \
+  zstack->zz.waiting_for = name(zstack); \
+}
 
 #define zown(fd) \
   zownfn(fd, &z->zz, (void*)z);
@@ -199,12 +197,36 @@ typedef struct {
 #define zaccept(ret, fd, addr, addrlen) \
   zyield(fd, EV_READ, ret = accept(fd, addr, addrlen);)
 
-#endif
+#define zwait(sem) \
+  case __LINE__: \
+  if (sem->count > 0) { \
+    sem->count--; \
+    sem->stack = NULL; \
+  } else { \
+    sem->stack = (void*)z; \
+    z->zz.state = __LINE__; \
+    zyield_t r; \
+    r.fd = ZNO_FD_OP; \
+    r.ev_type = ZSEM_EV; \
+    return r; \
+  } \
+
+#define zsignal(sem) \
+{ \
+  sem->count++; \
+  zstate_t* state = (zstate_t*)sem->stack; \
+  if (state) { \
+    state->sem_cb(sem->stack); \
+  } \
+} \
 
 void zownfn(int fd, zstate_t* zz, void*);
-void zclean(ev_io* w);
+void zclean(void* stack);
 void zinit();
 void zrun();
+extern struct ev_loop *zloop;
+
+#endif
 
 #ifdef ZASYNC_IMPL
 
@@ -230,11 +252,10 @@ void zownfn(int fd, zstate_t* zz, void* data) {
   ev_io_start(zloop, (ev_io*)w);
 }
 
-void zclean(ev_io* w) {
-  //XXX free all watchers
-  ev_io_stop(zloop, w);
-  free(w->data);
-  free(w);
+void zclean(void* stack) {
+  //XXX free/stop all watchers
+  //ev_io_stop(zloop, w);
+  free(stack);
 }
 
 #endif
